@@ -25,6 +25,61 @@ const analysisSchema = {
   ],
 } as const;
 
+interface HistoricalResolutionEvidence {
+  text: string;
+  sourceIncidentId?: string;
+}
+
+const outcomePattern = /\b(?:restored|resolved|reduced|returned|recovered|stabilized|stabilised|eliminated|cleared|fixed|repaired|mitigated|normalized|normalised)\b/i;
+const speculativePattern = /\b(?:consider(?:ed|ing)?|plan(?:ned|ning)?|propos(?:ed|ing)|attempt(?:ed|ing)|tr(?:ied|ying)|might|could|should|would|recommend(?:ed|ing)?|suggest(?:ed|ing)?)\b/i;
+const incidentIdPattern = /\b([A-Z][A-Z0-9]*-\d+)\b/i;
+const ignoredRelevanceTerms = new Set([
+  "after", "again", "also", "been", "being", "from", "into", "more", "most", "normal",
+  "over", "same", "some", "than", "that", "their", "there", "these", "they", "this",
+  "those", "through", "with", "without",
+]);
+
+function incidentTerms(value: string): Set<string> {
+  return new Set(
+    value.toLowerCase().match(/[a-z0-9]+/g)?.filter((term) => term.length > 2 && !ignoredRelevanceTerms.has(term)) ?? [],
+  );
+}
+
+// Keep this match tied to an explicit recalled action and successful outcome; never infer one from an action alone.
+function findHistoricalResolutionEvidence(
+  incident: IncidentInput,
+  memories: IncidentMemory[],
+): HistoricalResolutionEvidence[] {
+  const currentTerms = incidentTerms(`${incident.symptoms} ${incident.recentChange} ${incident.additionalContext ?? ""}`);
+  const evidence: HistoricalResolutionEvidence[] = [];
+
+  for (const memory of memories) {
+    const sourceIncidentId = memory.content.match(incidentIdPattern)?.[1]?.toUpperCase();
+    const clauses = memory.content
+      .split(/[\r\n]+|(?<=[.!?])\s+/)
+      .map((clause) => clause.split(/\s*\|\s*/)[0]?.trim() ?? "")
+      .filter(Boolean);
+
+    for (const clause of clauses) {
+      const outcome = outcomePattern.exec(clause);
+      if (!outcome || speculativePattern.test(clause)) continue;
+      if (/\b(?:not|never|failed to|unable to)\s+(?:\w+\s+){0,2}$/i.test(clause.slice(0, outcome.index))) continue;
+
+      const action = [...clause.slice(0, outcome.index).matchAll(/\b[a-z][a-z'-]*ing\b/gi)].at(-1);
+      if (!action || action.index === undefined) continue;
+
+      const matchedText = clause.slice(action.index).trim().replace(/[.!?]+$/, "");
+      const resolutionTerms = incidentTerms(matchedText);
+      if (![...currentTerms].some((term) => resolutionTerms.has(term))) continue;
+
+      evidence.push({ text: matchedText, ...(sourceIncidentId ? { sourceIncidentId } : {}) });
+      break;
+    }
+  }
+
+  return evidence;
+}
+
 function validateAnalysis(value: unknown): IncidentAnalysis {
   if (!value || typeof value !== "object") throw new Error("LLM response was not a JSON object.");
   const candidate = value as Record<string, unknown>;
@@ -65,6 +120,12 @@ export async function analyzeIncident(
   const hindsightMemories = memories.length
     ? memories.map((memory, index) => `HINDSIGHT MEMORY ${index + 1} [${memory.type}]: ${memory.content}`).join("\n\n")
     : "No relevant Hindsight memories were returned.";
+  const historicalResolutionEvidence = findHistoricalResolutionEvidence(incident, memories);
+  const explicitResolutionEvidence = historicalResolutionEvidence.length
+    ? historicalResolutionEvidence
+        .map((item) => `- ${item.text}${item.sourceIncidentId ? ` (source incident: ${item.sourceIncidentId})` : ""}`)
+        .join("\n")
+    : "No explicit, relevant successful resolution was detected in the recalled memories.";
 
   const response = await client.chat.completions.create({
     model,
@@ -77,13 +138,13 @@ export async function analyzeIncident(
           "Analyze the current incident using its evidence and the supplied Hindsight memories.",
           "Clearly distinguish observed evidence from inference in reasoning, and state uncertainty.",
           "Never invent historical incidents, facts, causes, or resolutions.",
-          "Only identify a historical resolution match when a supplied Hindsight memory supports it; otherwise say no supported match was found.",
+          "Use the HISTORICAL RESOLUTION EVIDENCE section when explaining relevant prior resolutions. Do not claim a resolution that is absent from that evidence.",
           "Return only the requested structured JSON.",
         ].join(" "),
       },
       {
         role: "user",
-        content: `CURRENT INCIDENT\n${currentIncident}\n\nRECALLED HINDSIGHT MEMORIES (historical evidence; do not treat as facts about the current incident without evidence)\n${hindsightMemories}`,
+        content: `CURRENT INCIDENT\n${currentIncident}\n\nRECALLED HINDSIGHT MEMORIES (historical evidence; do not treat as facts about the current incident without evidence)\n${hindsightMemories}\n\nHISTORICAL RESOLUTION EVIDENCE\n${explicitResolutionEvidence}`,
       },
     ],
     response_format: {
@@ -100,5 +161,13 @@ export async function analyzeIncident(
   } catch (error) {
     throw new Error(`LLM returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
   }
-  return validateAnalysis(parsed);
+  const analysis = validateAnalysis(parsed);
+  // This field is derived from validated retrieved evidence, not from a probabilistic model claim.
+  const historicalResolutionMatch = historicalResolutionEvidence.length
+    ? historicalResolutionEvidence
+        .map((item) => `${item.text}${item.sourceIncidentId ? ` (source incident: ${item.sourceIncidentId})` : ""}`)
+        .join("; ")
+    : "No supported match found";
+
+  return { ...analysis, historicalResolutionMatch };
 }
