@@ -9,7 +9,10 @@ const analysisSchema = {
     summary: { type: "string" },
     likelyCauses: { type: "array", items: { type: "string" } },
     investigationSteps: { type: "array", items: { type: "string" } },
-    recommendedAction: { type: "string" },
+    recommendedAction: {
+      type: "string",
+      description: "One concise recommended action as a single string; never return an array.",
+    },
     reasoning: { type: "string" },
     confidence: { type: "number" },
     historicalResolutionMatch: { type: "string" },
@@ -83,6 +86,13 @@ function findHistoricalResolutionEvidence(
 function validateAnalysis(value: unknown): IncidentAnalysis {
   if (!value || typeof value !== "object") throw new Error("LLM response was not a JSON object.");
   const candidate = value as Record<string, unknown>;
+  if (Array.isArray(candidate.recommendedAction)) {
+    const actions = candidate.recommendedAction
+      .filter((action): action is string => typeof action === "string")
+      .map((action) => action.trim())
+      .filter(Boolean);
+    candidate.recommendedAction = actions.join(" ");
+  }
   const stringFields = ["summary", "recommendedAction", "reasoning", "historicalResolutionMatch"];
   for (const field of stringFields) {
     if (typeof candidate[field] !== "string") throw new Error(`LLM response is missing string field: ${field}`);
@@ -138,6 +148,7 @@ export async function analyzeIncident(
           "Analyze the current incident using its evidence and the supplied Hindsight memories.",
           "Clearly distinguish observed evidence from inference in reasoning, and state uncertainty.",
           "Never invent historical incidents, facts, causes, or resolutions.",
+          "recommendedAction must be one concise string containing the single primary recommendation; never return it as an array or a list of alternatives.",
           "Use the HISTORICAL RESOLUTION EVIDENCE section when explaining relevant prior resolutions. Do not claim a resolution that is absent from that evidence.",
           "Return only the requested structured JSON.",
         ].join(" "),

@@ -1,5 +1,5 @@
 import { HindsightError } from "@vectorize-io/hindsight-client";
-import { getHindsightClient, INCIDENT_BANK_ID } from "./hindsight.ts";
+import { getHindsightClient, INCIDENT_BANK_ID, retainIncidentMemory } from "./hindsight.ts";
 import { analyzeIncident } from "./llm.ts";
 import type { IncidentInput, IncidentMemory } from "./types.ts";
 
@@ -85,7 +85,7 @@ export async function analyzeAndLearn(incident: IncidentInput): Promise<AnalyzeI
     "Resolution and final outcome: pending operator confirmation.",
   ].join("\n");
   try {
-    await hindsight.retain(INCIDENT_BANK_ID, retainedContent, {
+    await retainIncidentMemory(incident.incidentId, retainedContent, {
       context: "Incident response analysis; outcome pending operator confirmation",
       metadata: { incidentId: incident.incidentId, source: "incident-memory-agent" },
     });
