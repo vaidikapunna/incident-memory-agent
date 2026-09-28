@@ -7,9 +7,10 @@ const app = express();
 const port = Number(process.env.PORT || 3000);
 
 const localDevelopmentOrigin = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
+const configuredFrontendOrigin = process.env.FRONTEND_URL?.trim().replace(/\/+$/, "");
 app.use(cors({
   origin(origin, callback) {
-    callback(null, !origin || localDevelopmentOrigin.test(origin));
+    callback(null, !origin || localDevelopmentOrigin.test(origin) || origin === configuredFrontendOrigin);
   },
 }));
 app.use(express.json({ limit: "64kb" }));
